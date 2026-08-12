@@ -37,6 +37,8 @@ type RectElement = {
   w: number;
   h: number;
   color: string;
+  locked?: boolean;
+  groupId?: string;
 };
 
 type LineElement = {
@@ -48,6 +50,8 @@ type LineElement = {
   x2: number;
   y2: number;
   thickness?: number;
+  locked?: boolean;
+  groupId?: string;
 };
 
 type PlanElement = RectElement | LineElement;
@@ -66,6 +70,12 @@ type Interaction =
       start: Point;
       before: PlanElement[];
       original: PlanElement;
+    }
+  | {
+      type: "move-selection";
+      ids: string[];
+      start: Point;
+      before: PlanElement[];
     }
   | {
       type: "resize";
@@ -291,6 +301,18 @@ function scenePoints(element: PlanElement): Point[] {
   ];
 }
 
+function elementBounds(element: PlanElement) {
+  if (isRect(element)) {
+    return { left: element.x, top: element.y, right: element.x + element.w, bottom: element.y + element.h };
+  }
+  return {
+    left: Math.min(element.x1, element.x2),
+    top: Math.min(element.y1, element.y2),
+    right: Math.max(element.x1, element.x2),
+    bottom: Math.max(element.y1, element.y2),
+  };
+}
+
 function validateImportedScene(value: unknown): PlanElement[] | null {
   const candidate =
     Array.isArray(value)
@@ -330,11 +352,13 @@ export default function Home() {
   const elementsRef = useRef<PlanElement[]>(cloneScene(INITIAL_ELEMENTS));
   const interactionRef = useRef<Interaction | null>(null);
   const propertyStartRef = useRef<PlanElement[] | null>(null);
+  const copiedElementsRef = useRef<PlanElement[]>([]);
+  const spacePressedRef = useRef(false);
 
   const [elements, setElements] = useState<PlanElement[]>(() =>
     cloneScene(INITIAL_ELEMENTS),
   );
-  const [selectedId, setSelectedId] = useState<string | null>("rack-oval");
+  const [selectedIds, setSelectedIds] = useState<string[]>(["rack-oval"]);
   const [tool, setTool] = useState<Tool>("select");
   const [draft, setDraft] = useState<DraftLine | null>(null);
   const [snapPoint, setSnapPoint] = useState<Point | null>(null);
@@ -356,11 +380,21 @@ export default function Home() {
   const [hydrated, setHydrated] = useState(false);
   const [saveLabel, setSaveLabel] = useState("Hazırlanıyor…");
   const [notice, setNotice] = useState<string | null>(null);
+  const [isSpacePressed, setIsSpacePressed] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
+  const selectedId = selectedIds.length === 1 ? selectedIds[0] : null;
+  const selection = useMemo(
+    () => elements.filter((element) => selectedIds.includes(element.id)),
+    [elements, selectedIds],
+  );
   const selected = useMemo(
     () => elements.find((element) => element.id === selectedId) ?? null,
     [elements, selectedId],
   );
+  const selectionLocked = selection.length > 0 && selection.every((item) => item.locked);
+  const selectionGrouped = selection.some((item) => item.groupId);
 
   const roomArea = useMemo(
     () =>
@@ -461,7 +495,7 @@ export default function Home() {
     setPast((items) => items.slice(0, -1));
     setFuture((items) => [current, ...items].slice(0, HISTORY_LIMIT));
     setSceneDirect(cloneScene(previous));
-    setSelectedId(null);
+    setSelectedIds([]);
   }, [past, setSceneDirect]);
 
   const redo = useCallback(() => {
@@ -474,7 +508,7 @@ export default function Home() {
       current,
     ]);
     setSceneDirect(cloneScene(next));
-    setSelectedId(null);
+    setSelectedIds([]);
   }, [future, setSceneDirect]);
 
   const cameraCenterMeters = useCallback(
@@ -501,7 +535,7 @@ export default function Home() {
         color: preset?.color ?? "#0f766e",
       };
       commitScene([...elementsRef.current, next]);
-      setSelectedId(next.id);
+      setSelectedIds([next.id]);
       setTool("select");
       showNotice(`${next.name} eklendi`);
     },
@@ -509,40 +543,170 @@ export default function Home() {
   );
 
   const deleteSelected = useCallback(() => {
-    if (!selectedId) return;
-    const target = elementsRef.current.find((item) => item.id === selectedId);
-    commitScene(elementsRef.current.filter((item) => item.id !== selectedId));
-    setSelectedId(null);
-    showNotice(`${target?.name ?? "Nesne"} silindi`);
-  }, [commitScene, selectedId, showNotice]);
+    if (!selectedIds.length) return;
+    const deletable = new Set(
+      elementsRef.current
+        .filter((item) => selectedIds.includes(item.id) && !item.locked)
+        .map((item) => item.id),
+    );
+    if (!deletable.size) {
+      showNotice("Kilitli öğeler silinemez; önce kilidi aç");
+      return;
+    }
+    commitScene(elementsRef.current.filter((item) => !deletable.has(item.id)));
+    setSelectedIds((ids) => ids.filter((id) => !deletable.has(id)));
+    showNotice(`${deletable.size} öğe silindi`);
+  }, [commitScene, selectedIds, showNotice]);
 
   const duplicateSelected = useCallback(() => {
-    if (!selected) return;
-    const id = makeId(selected.kind);
-    const duplicate: PlanElement = isRect(selected)
-      ? {
-          ...selected,
-          id,
-          name: `${selected.name} kopyası`,
-          x: roundMetric(selected.x + 0.25),
-          y: roundMetric(selected.y + 0.25),
+    if (!selection.length) return;
+    const groupMap = new Map<string, string>();
+    const duplicates = selection.map((element) => {
+      const id = makeId(element.kind);
+      const groupId = element.groupId
+        ? groupMap.get(element.groupId) ?? makeId("group")
+        : undefined;
+      if (element.groupId && groupId) groupMap.set(element.groupId, groupId);
+      return isRect(element)
+        ? {
+            ...element,
+            id,
+            groupId,
+            locked: false,
+            name: `${element.name} kopyası`,
+            x: roundMetric(element.x + 0.25),
+            y: roundMetric(element.y + 0.25),
+          }
+        : {
+            ...element,
+            id,
+            groupId,
+            locked: false,
+            name: `${element.name} kopyası`,
+            x1: roundMetric(element.x1 + 0.25),
+            y1: roundMetric(element.y1 + 0.25),
+            x2: roundMetric(element.x2 + 0.25),
+            y2: roundMetric(element.y2 + 0.25),
+          };
+    }) as PlanElement[];
+    commitScene([...elementsRef.current, ...duplicates]);
+    setSelectedIds(duplicates.map((item) => item.id));
+    showNotice(`${duplicates.length} öğenin kopyası oluşturuldu`);
+  }, [commitScene, selection, showNotice]);
+
+  const copySelected = useCallback(() => {
+    if (!selection.length) return;
+    copiedElementsRef.current = cloneScene(selection);
+    showNotice(`${selection.length} öğe kopyalandı`);
+  }, [selection, showNotice]);
+
+  const pasteCopied = useCallback(() => {
+    if (!copiedElementsRef.current.length) return;
+    const groupMap = new Map<string, string>();
+    const pasted = copiedElementsRef.current.map((element) => {
+      const id = makeId(element.kind);
+      const groupId = element.groupId
+        ? groupMap.get(element.groupId) ?? makeId("group")
+        : undefined;
+      if (element.groupId && groupId) groupMap.set(element.groupId, groupId);
+      return isRect(element)
+        ? {
+            ...element,
+            id,
+            groupId,
+            locked: false,
+            name: `${element.name} kopyası`,
+            x: roundMetric(clamp(element.x + 0.15, 0, PLAN_WIDTH_M - element.w)),
+            y: roundMetric(clamp(element.y + 0.15, 0, PLAN_HEIGHT_M - element.h)),
+          }
+        : {
+            ...element,
+            id,
+            groupId,
+            locked: false,
+            name: `${element.name} kopyası`,
+            x1: roundMetric(element.x1 + 0.15),
+            y1: roundMetric(element.y1 + 0.15),
+            x2: roundMetric(element.x2 + 0.15),
+            y2: roundMetric(element.y2 + 0.15),
+          };
+    }) as PlanElement[];
+    commitScene([...elementsRef.current, ...pasted]);
+    setSelectedIds(pasted.map((item) => item.id));
+    copiedElementsRef.current = cloneScene(pasted);
+    showNotice("Kopya plana yapıştırıldı");
+  }, [commitScene, showNotice]);
+
+  const nudgeSelected = useCallback(
+    (dx: number, dy: number) => {
+      if (!selection.length) return;
+      const movable = new Set(selection.filter((item) => !item.locked).map((item) => item.id));
+      if (!movable.size) return;
+      const next = elementsRef.current.map((element) => {
+        if (!movable.has(element.id)) return element;
+        if (isRect(element)) {
+          return {
+            ...element,
+            x: roundMetric(clamp(element.x + dx, 0, PLAN_WIDTH_M - element.w)),
+            y: roundMetric(clamp(element.y + dy, 0, PLAN_HEIGHT_M - element.h)),
+          };
         }
-      : {
-          ...selected,
-          id,
-          name: `${selected.name} kopyası`,
-          x1: roundMetric(selected.x1 + 0.25),
-          y1: roundMetric(selected.y1 + 0.25),
-          x2: roundMetric(selected.x2 + 0.25),
-          y2: roundMetric(selected.y2 + 0.25),
+        return {
+          ...element,
+          x1: roundMetric(element.x1 + dx),
+          y1: roundMetric(element.y1 + dy),
+          x2: roundMetric(element.x2 + dx),
+          y2: roundMetric(element.y2 + dy),
         };
-    commitScene([...elementsRef.current, duplicate]);
-    setSelectedId(id);
-    showNotice("Kopya oluşturuldu");
-  }, [commitScene, selected, showNotice]);
+      });
+      commitScene(next);
+    },
+    [commitScene, selection],
+  );
+
+  const groupSelection = useCallback(() => {
+    if (selection.length < 2) return;
+    const groupId = makeId("group");
+    const ids = new Set(selectedIds);
+    commitScene(
+      elementsRef.current.map((element) =>
+        ids.has(element.id) ? { ...element, groupId } : element,
+      ),
+    );
+    showNotice(`${selection.length} öğe gruplandı`);
+  }, [commitScene, selectedIds, selection.length, showNotice]);
+
+  const ungroupSelection = useCallback(() => {
+    const groupIds = new Set(selection.map((item) => item.groupId).filter(Boolean));
+    if (!groupIds.size) return;
+    const affected = elementsRef.current.filter(
+      (item) => item.groupId && groupIds.has(item.groupId),
+    );
+    commitScene(
+      elementsRef.current.map((element) =>
+        element.groupId && groupIds.has(element.groupId)
+          ? { ...element, groupId: undefined }
+          : element,
+      ),
+    );
+    setSelectedIds(affected.map((item) => item.id));
+    showNotice("Grup çözüldü");
+  }, [commitScene, selection, showNotice]);
+
+  const toggleLockSelection = useCallback(() => {
+    if (!selection.length) return;
+    const ids = new Set(selectedIds);
+    const nextLocked = !selectionLocked;
+    commitScene(
+      elementsRef.current.map((element) =>
+        ids.has(element.id) ? { ...element, locked: nextLocked } : element,
+      ),
+    );
+    showNotice(nextLocked ? "Seçim kilitlendi" : "Seçimin kilidi açıldı");
+  }, [commitScene, selectedIds, selection.length, selectionLocked, showNotice]);
 
   const rotateSelected = useCallback(() => {
-    if (!selected || !isRect(selected)) return;
+    if (!selected || !isRect(selected) || selected.locked) return;
     const centerX = selected.x + selected.w / 2;
     const centerY = selected.y + selected.h / 2;
     const next = elementsRef.current.map((element) =>
@@ -566,6 +730,7 @@ export default function Home() {
       const index = current.findIndex((element) => element.id === selectedId);
       if (index < 0) return;
       const target = current[index];
+      if (target.locked) return;
       const rest = current.filter((element) => element.id !== selectedId);
       commitScene(
         direction === "front" ? [...rest, target] : [target, ...rest],
@@ -594,12 +759,13 @@ export default function Home() {
   const updateSelectedLive = useCallback(
     (patch: Partial<RectElement & LineElement>) => {
       if (!selectedId) return;
+      if (selected?.locked) return;
       const next = elementsRef.current.map((element) =>
         element.id === selectedId ? ({ ...element, ...patch } as PlanElement) : element,
       );
       setSceneDirect(next);
     },
-    [selectedId, setSceneDirect],
+    [selected, selectedId, setSceneDirect],
   );
 
   const svgPoint = useCallback((event: ReactPointerEvent<SVGSVGElement>) => {
@@ -639,7 +805,7 @@ export default function Home() {
   );
 
   const alignMovingRect = useCallback(
-    (rect: RectElement, bypass: boolean) => {
+    (rect: RectElement, bypass: boolean, excludeIds = new Set<string>([rect.id])) => {
       if (!snapEnabled || bypass) {
         return { rect, guides: { vertical: [], horizontal: [] } as SnapGuides };
       }
@@ -655,7 +821,7 @@ export default function Home() {
       let horizontalGuide: number | null = null;
 
       elementsRef.current.forEach((element) => {
-        if (element.id === rect.id || !isRect(element)) return;
+        if (excludeIds.has(element.id) || !isRect(element)) return;
         const targetX = [element.x, element.x + element.w / 2, element.x + element.w];
         const targetY = [element.y, element.y + element.h / 2, element.y + element.h];
 
@@ -702,9 +868,21 @@ export default function Home() {
       event.preventDefault();
       event.stopPropagation();
       setSnapGuides({ vertical: [], horizontal: [] });
-      setSelectedId(element.id);
+      const groupedIds = element.groupId
+        ? elementsRef.current.filter((item) => item.groupId === element.groupId).map((item) => item.id)
+        : [];
+      const ids = groupedIds.length
+        ? groupedIds
+        : selectedIds.includes(element.id)
+          ? selectedIds
+          : [element.id];
+      setSelectedIds(ids);
       const svg = svgRef.current;
       if (!svg) return;
+      if (elementsRef.current.some((item) => ids.includes(item.id) && item.locked)) {
+        showNotice("Bu seçim kilitli; taşımak için önce kilidi aç");
+        return;
+      }
       svg.setPointerCapture(event.pointerId);
       const syntheticPoint = svg.createSVGPoint();
       syntheticPoint.x = event.clientX;
@@ -712,20 +890,44 @@ export default function Home() {
       const matrix = svg.getScreenCTM();
       if (!matrix) return;
       const local = syntheticPoint.matrixTransform(matrix.inverse());
-      interactionRef.current = {
-        type: "move",
-        id: element.id,
-        start: { x: local.x / SCALE, y: local.y / SCALE },
-        before: cloneScene(elementsRef.current),
-        original: { ...element },
-      };
+      interactionRef.current =
+        ids.length > 1
+          ? {
+              type: "move-selection",
+              ids,
+              start: { x: local.x / SCALE, y: local.y / SCALE },
+              before: cloneScene(elementsRef.current),
+            }
+          : {
+              type: "move",
+              id: element.id,
+              start: { x: local.x / SCALE, y: local.y / SCALE },
+              before: cloneScene(elementsRef.current),
+              original: { ...element },
+            };
     },
-    [],
+    [selectedIds, showNotice],
   );
 
   const handleElementPointerDown = useCallback(
     (event: ReactPointerEvent<SVGElement>, element: PlanElement) => {
-      if (tool !== "select") return;
+      if (tool !== "select" || event.button !== 0 || spacePressedRef.current) {
+        return;
+      }
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        const memberIds = element.groupId
+          ? elementsRef.current.filter((item) => item.groupId === element.groupId).map((item) => item.id)
+          : [element.id];
+        setSelectedIds((current) => {
+          const removing = memberIds.every((id) => current.includes(id));
+          return removing
+            ? current.filter((id) => !memberIds.includes(id))
+            : Array.from(new Set([...current, ...memberIds]));
+        });
+        return;
+      }
       startMove(event, element);
     },
     [startMove, tool],
@@ -775,18 +977,24 @@ export default function Home() {
 
   const handleStagePointerDown = useCallback(
     (event: ReactPointerEvent<SVGSVGElement>) => {
-      if (event.button !== 0 && event.button !== 1) return;
-      if (tool === "select") {
-        setSelectedId(null);
-        return;
-      }
-      if (tool === "pan") {
+      if (event.button !== 0 && event.button !== 1 && event.button !== 2) return;
+      const panGesture =
+        event.button === 1 ||
+        event.button === 2 ||
+        (event.button === 0 && (tool === "pan" || spacePressedRef.current));
+      if (panGesture) {
+        event.preventDefault();
         event.currentTarget.setPointerCapture(event.pointerId);
         interactionRef.current = {
           type: "pan",
           startClient: { x: event.clientX, y: event.clientY },
           startCamera: { ...camera },
         };
+        setIsPanning(true);
+        return;
+      }
+      if (tool === "select") {
+        setSelectedIds([]);
         return;
       }
       const point = snappedPoint(svgPoint(event), undefined, event.ctrlKey);
@@ -815,7 +1023,7 @@ export default function Home() {
         ...(draft.kind === "wall" ? { thickness: 0.12 } : {}),
       };
       commitScene([...elementsRef.current, next]);
-      setSelectedId(next.id);
+      setSelectedIds([next.id]);
       setDraft(null);
       setSnapPoint(null);
       showNotice(
@@ -899,6 +1107,52 @@ export default function Home() {
         return;
       }
 
+      if (interaction.type === "move-selection") {
+        const ids = new Set(interaction.ids);
+        const moving = interaction.before.filter((item) => ids.has(item.id));
+        const bounds = moving.map(elementBounds);
+        const left = Math.min(...bounds.map((item) => item.left));
+        const top = Math.min(...bounds.map((item) => item.top));
+        const right = Math.max(...bounds.map((item) => item.right));
+        const bottom = Math.max(...bounds.map((item) => item.bottom));
+        let dx = clamp(raw.x - interaction.start.x, -left, PLAN_WIDTH_M - right);
+        let dy = clamp(raw.y - interaction.start.y, -top, PLAN_HEIGHT_M - bottom);
+        const proposedBounds: RectElement = {
+          id: "__selection__",
+          kind: "object",
+          name: "Seçim",
+          color: "#d946ef",
+          x: left + dx,
+          y: top + dy,
+          w: right - left,
+          h: bottom - top,
+        };
+        const aligned = alignMovingRect(proposedBounds, event.ctrlKey, ids);
+        dx += aligned.rect.x - proposedBounds.x;
+        dy += aligned.rect.y - proposedBounds.y;
+        setSnapGuides(aligned.guides);
+        setSceneDirect(
+          interaction.before.map((element) => {
+            if (!ids.has(element.id)) return element;
+            if (isRect(element)) {
+              return {
+                ...element,
+                x: roundMetric(element.x + dx),
+                y: roundMetric(element.y + dy),
+              };
+            }
+            return {
+              ...element,
+              x1: roundMetric(element.x1 + dx),
+              y1: roundMetric(element.y1 + dy),
+              x2: roundMetric(element.x2 + dx),
+              y2: roundMetric(element.y2 + dy),
+            };
+          }),
+        );
+        return;
+      }
+
       if (interaction.type === "resize") {
         const point = snappedPoint(raw, interaction.id, event.ctrlKey);
         const snappedX = Math.abs(point.x - raw.x) > 0.001;
@@ -975,6 +1229,7 @@ export default function Home() {
       }
       interactionRef.current = null;
       setSnapGuides({ vertical: [], horizontal: [] });
+      setIsPanning(false);
       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
         event.currentTarget.releasePointerCapture(event.pointerId);
       }
@@ -1055,7 +1310,7 @@ export default function Home() {
         const imported = validateImportedScene(parsed);
         if (!imported) throw new Error("invalid");
         commitScene(cloneScene(imported));
-        setSelectedId(null);
+        setSelectedIds([]);
         fitPlan();
         showNotice("Plan açıldı");
       } catch {
@@ -1070,7 +1325,7 @@ export default function Home() {
       return;
     }
     commitScene([]);
-    setSelectedId(null);
+    setSelectedIds([]);
     setDraft(null);
     showNotice("Boş plan hazır");
   }, [commitScene, showNotice]);
@@ -1080,7 +1335,7 @@ export default function Home() {
       return;
     }
     commitScene(cloneScene(INITIAL_ELEMENTS));
-    setSelectedId("rack-oval");
+    setSelectedIds(["rack-oval"]);
     setDraft(null);
     fitPlan();
     showNotice("Örnek dükkân geri yüklendi");
@@ -1097,7 +1352,11 @@ export default function Home() {
         return;
       }
       const modifier = event.ctrlKey || event.metaKey;
-      if (modifier && event.key.toLowerCase() === "z") {
+      if (event.code === "Space") {
+        event.preventDefault();
+        spacePressedRef.current = true;
+        setIsSpacePressed(true);
+      } else if (modifier && event.key.toLowerCase() === "z") {
         event.preventDefault();
         if (event.shiftKey) redo();
         else undo();
@@ -1107,14 +1366,44 @@ export default function Home() {
       } else if (modifier && event.key.toLowerCase() === "d") {
         event.preventDefault();
         duplicateSelected();
+      } else if (modifier && event.key.toLowerCase() === "c") {
+        event.preventDefault();
+        copySelected();
+      } else if (modifier && event.key.toLowerCase() === "v") {
+        event.preventDefault();
+        pasteCopied();
+      } else if (modifier && event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        setSelectedIds(elementsRef.current.map((item) => item.id));
+      } else if (modifier && event.key.toLowerCase() === "g") {
+        event.preventDefault();
+        if (event.shiftKey) ungroupSelection();
+        else groupSelection();
+      } else if (modifier && event.shiftKey && event.key.toLowerCase() === "l") {
+        event.preventDefault();
+        toggleLockSelection();
+      } else if (event.key.startsWith("Arrow")) {
+        event.preventDefault();
+        const step = event.shiftKey ? 0.1 : 0.01;
+        if (event.key === "ArrowLeft") nudgeSelected(-step, 0);
+        if (event.key === "ArrowRight") nudgeSelected(step, 0);
+        if (event.key === "ArrowUp") nudgeSelected(0, -step);
+        if (event.key === "ArrowDown") nudgeSelected(0, step);
       } else if (event.key === "Delete" || event.key === "Backspace") {
         event.preventDefault();
         deleteSelected();
       } else if (event.key === "Escape") {
+        if (shortcutsOpen) {
+          setShortcutsOpen(false);
+          return;
+        }
         setDraft(null);
         setSnapPoint(null);
         setSnapGuides({ vertical: [], horizontal: [] });
+        setSelectedIds([]);
         setTool("select");
+      } else if (event.key === "?") {
+        setShortcutsOpen(true);
       } else if (event.key.toLowerCase() === "v") {
         setTool("select");
       } else if (event.key.toLowerCase() === "h") {
@@ -1125,9 +1414,25 @@ export default function Home() {
         setTool("measure");
       }
     };
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.code !== "Space") return;
+      spacePressedRef.current = false;
+      setIsSpacePressed(false);
+    };
+    const handleBlur = () => {
+      spacePressedRef.current = false;
+      setIsSpacePressed(false);
+      setIsPanning(false);
+    };
     window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [deleteSelected, duplicateSelected, redo, undo]);
+    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", handleBlur);
+    return () => {
+      window.removeEventListener("keydown", handleKey);
+      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", handleBlur);
+    };
+  }, [copySelected, deleteSelected, duplicateSelected, groupSelection, nudgeSelected, pasteCopied, redo, shortcutsOpen, toggleLockSelection, undo, ungroupSelection]);
 
   const orderedElements = useMemo(() => {
     const priority: Record<PlanElement["kind"], number> = {
@@ -1159,7 +1464,7 @@ export default function Home() {
             : "Ölçülecek ilk noktayı seç; köşe ve orta noktalar yakalanır.";
 
   const renderElement = (element: PlanElement) => {
-    const isSelected = element.id === selectedId;
+    const isSelected = selectedIds.includes(element.id);
     if (isRect(element)) {
       const x = element.x * SCALE;
       const y = element.y * SCALE;
@@ -1169,7 +1474,7 @@ export default function Home() {
       return (
         <g
           key={element.id}
-          className={`plan-element ${element.kind} ${isSelected ? "selected" : ""}`}
+          className={`plan-element ${element.kind} ${isSelected ? "selected" : ""} ${element.locked ? "locked" : ""}`}
           onPointerDown={(event) => handleElementPointerDown(event, element)}
           aria-label={`${TYPE_LABELS[element.kind]}: ${element.name}`}
         >
@@ -1213,6 +1518,9 @@ export default function Home() {
               </text>
             </g>
           )}
+          {element.locked && (
+            <text className="lock-indicator" x={x + w - 8} y={y + 15} textAnchor="end" pointerEvents="none">🔒</text>
+          )}
         </g>
       );
     }
@@ -1230,7 +1538,7 @@ export default function Home() {
     return (
       <g
         key={element.id}
-        className={`plan-element ${element.kind} ${isSelected ? "selected" : ""}`}
+        className={`plan-element ${element.kind} ${isSelected ? "selected" : ""} ${element.locked ? "locked" : ""}`}
         onPointerDown={(event) => handleElementPointerDown(event, element)}
         aria-label={`${TYPE_LABELS[element.kind]}: ${element.name}`}
       >
@@ -1270,12 +1578,26 @@ export default function Home() {
           {element.kind === "measure" ? "↔ " : ""}
           {formatMetric(length)} m
         </text>
+        {element.locked && (
+          <text className="lock-indicator" x={middleX + 12} y={middleY + 18} pointerEvents="none">🔒</text>
+        )}
       </g>
     );
   };
 
-  const selectedRect = selected && isRect(selected) ? selected : null;
-  const selectedLine = selected && isLine(selected) ? selected : null;
+  const selectedRect = selected && isRect(selected) && !selected.locked ? selected : null;
+  const selectedLine = selected && isLine(selected) && !selected.locked ? selected : null;
+  const multiSelectionBounds = selection.length > 1
+    ? (() => {
+        const bounds = selection.map(elementBounds);
+        return {
+          left: Math.min(...bounds.map((item) => item.left)),
+          top: Math.min(...bounds.map((item) => item.top)),
+          right: Math.max(...bounds.map((item) => item.right)),
+          bottom: Math.max(...bounds.map((item) => item.bottom)),
+        };
+      })()
+    : null;
   const rectHandles = selectedRect
     ? [
         { corner: "nw" as const, x: selectedRect.x, y: selectedRect.y },
@@ -1320,6 +1642,9 @@ export default function Home() {
           </button>
           <button className="quiet-button" onClick={redo} disabled={!future.length}>
             ↷ <span>Yinele</span>
+          </button>
+          <button className="quiet-button" onClick={() => setShortcutsOpen(true)}>
+            ? <span>Kısayollar</span>
           </button>
           <button
             className="quiet-button"
@@ -1503,7 +1828,7 @@ export default function Home() {
             </div>
             <svg
               ref={svgRef}
-              className={`plan-stage tool-${tool}`}
+              className={`plan-stage tool-${tool} ${isSpacePressed ? "space-ready" : ""} ${isPanning ? "is-panning" : ""}`}
               viewBox={`${camera.x} ${camera.y} ${camera.w} ${camera.h}`}
               role="application"
               aria-label="Mağaza planı düzenleme alanı"
@@ -1511,6 +1836,7 @@ export default function Home() {
               onPointerMove={handleStagePointerMove}
               onPointerUp={finishInteraction}
               onPointerCancel={finishInteraction}
+              onContextMenu={(event) => event.preventDefault()}
               onWheel={handleWheel}
             >
               <defs>
@@ -1580,6 +1906,18 @@ export default function Home() {
               )}
 
               {orderedElements.map(renderElement)}
+
+              {multiSelectionBounds && (
+                <rect
+                  className="multi-selection-bounds"
+                  x={multiSelectionBounds.left * SCALE - 5}
+                  y={multiSelectionBounds.top * SCALE - 5}
+                  width={(multiSelectionBounds.right - multiSelectionBounds.left) * SCALE + 10}
+                  height={(multiSelectionBounds.bottom - multiSelectionBounds.top) * SCALE + 10}
+                  rx={5}
+                  pointerEvents="none"
+                />
+              )}
 
               {(snapGuides.vertical.length > 0 ||
                 snapGuides.horizontal.length > 0) && (
@@ -1692,13 +2030,50 @@ export default function Home() {
             </span>
             <span>Izgara: {gridStep * 100} cm</span>
             <span>Ctrl: serbest yerleştir</span>
+            <span>Sağ tuş / Space: gezin</span>
+            <span>Ctrl + tık: çoklu seç</span>
+            <span>Oklar: 1 cm taşı</span>
             <span>Fare tekeri: yakınlaştır</span>
             <span>Delete: sil</span>
           </div>
         </section>
 
         <aside className="inspector-panel" aria-label="Özellikler">
-          {selected ? (
+          {selection.length > 1 ? (
+            <>
+              <div className="inspector-heading">
+                <div>
+                  <span className="type-badge object">Çoklu seçim</span>
+                  <h2>{selection.length} öğe seçildi</h2>
+                </div>
+                <button
+                  className="close-selection"
+                  aria-label="Seçimi kapat"
+                  onClick={() => setSelectedIds([])}
+                >
+                  ×
+                </button>
+              </div>
+              <div className="multi-selection-note">
+                <strong>Birlikte düzenle</strong>
+                <p>Seçimi sürükleyerek birlikte taşıyabilir, gruplayabilir veya kilitleyebilirsin.</p>
+              </div>
+              <div className="property-group">
+                <h3>Grup ve koruma</h3>
+                <div className="action-grid">
+                  <button onClick={groupSelection} disabled={selectionGrouped}>Grupla</button>
+                  <button onClick={ungroupSelection} disabled={!selectionGrouped}>Grubu çöz</button>
+                  <button onClick={toggleLockSelection}>
+                    {selectionLocked ? "Kilidi aç" : "Kilitle"}
+                  </button>
+                  <button onClick={duplicateSelected}>Çoğalt</button>
+                </div>
+                <button className="delete-button" onClick={deleteSelected}>
+                  Seçili öğeleri sil
+                </button>
+              </div>
+            </>
+          ) : selected ? (
             <>
               <div className="inspector-heading">
                 <div>
@@ -1710,7 +2085,7 @@ export default function Home() {
                 <button
                   className="close-selection"
                   aria-label="Seçimi kapat"
-                  onClick={() => setSelectedId(null)}
+                  onClick={() => setSelectedIds([])}
                 >
                   ×
                 </button>
@@ -1870,6 +2245,10 @@ export default function Home() {
                   </button>
                   <button onClick={() => moveLayer("front")}>Öne getir</button>
                   <button onClick={() => moveLayer("back")}>Arkaya al</button>
+                  <button onClick={toggleLockSelection}>
+                    {selected.locked ? "Kilidi aç" : "Kilitle"}
+                  </button>
+                  {selected.groupId && <button onClick={ungroupSelection}>Grubu çöz</button>}
                 </div>
                 <button className="delete-button" onClick={deleteSelected}>
                   Seçili nesneyi sil
@@ -1930,7 +2309,54 @@ export default function Home() {
           <span aria-hidden="true">✓</span> {notice}
         </div>
       )}
+
+      {shortcutsOpen && (
+        <div className="shortcut-backdrop" onPointerDown={() => setShortcutsOpen(false)}>
+          <section
+            className="shortcut-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="shortcut-title"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <div className="shortcut-heading">
+              <div>
+                <span>Hızlı kullanım</span>
+                <h2 id="shortcut-title">Klavye ve fare kısayolları</h2>
+              </div>
+              <button aria-label="Kısayolları kapat" onClick={() => setShortcutsOpen(false)}>×</button>
+            </div>
+            <div className="shortcut-list">
+              <Shortcut keys="Sağ tuş + sürükle" label="Plan üzerinde gezin" />
+              <Shortcut keys="Space + sürükle" label="Geçici el aracı" />
+              <Shortcut keys="Fare tekeri" label="Yakınlaştır / uzaklaştır" />
+              <Shortcut keys="Ctrl basılı" label="Hizalamayı geçici kapat" />
+              <Shortcut keys="Yön tuşları" label="Seçileni 1 cm taşı" />
+              <Shortcut keys="Shift + yön" label="Seçileni 10 cm taşı" />
+              <Shortcut keys="Ctrl + C / V" label="Kopyala / yapıştır" />
+              <Shortcut keys="Ctrl + sol tık" label="Çoklu seçim yap" />
+              <Shortcut keys="Ctrl + A" label="Tüm öğeleri seç" />
+              <Shortcut keys="Ctrl + G" label="Seçimi grupla" />
+              <Shortcut keys="Ctrl + Shift + G" label="Grubu çöz" />
+              <Shortcut keys="Ctrl + Shift + L" label="Kilitle / kilidi aç" />
+              <Shortcut keys="Ctrl + D" label="Hızlı çoğalt" />
+              <Shortcut keys="Ctrl + Z / Y" label="Geri al / yinele" />
+              <Shortcut keys="Delete" label="Seçileni sil" />
+              <Shortcut keys="Esc" label="Seçimi veya aracı bırak" />
+            </div>
+          </section>
+        </div>
+      )}
     </main>
+  );
+}
+
+function Shortcut({ keys, label }: { keys: string; label: string }) {
+  return (
+    <div className="shortcut-row">
+      <kbd>{keys}</kbd>
+      <span>{label}</span>
+    </div>
   );
 }
 

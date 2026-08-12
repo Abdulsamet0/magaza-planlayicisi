@@ -550,6 +550,14 @@ select:focus-visible {
   cursor: grab;
 }
 
+.plan-stage.space-ready {
+  cursor: grab;
+}
+
+.plan-stage.is-panning {
+  cursor: grabbing;
+}
+
 .plan-stage.tool-wall,
 .plan-stage.tool-measure {
   cursor: crosshair;
@@ -751,6 +759,137 @@ select:focus-visible {
   stroke-dasharray: 5 4;
   vector-effect: non-scaling-stroke;
   filter: drop-shadow(0 0 2px rgb(217 70 239 / 38%));
+}
+
+.multi-selection-bounds {
+  fill: none;
+  stroke: #8b5cf6;
+  stroke-width: 1.5;
+  stroke-dasharray: 7 4;
+  vector-effect: non-scaling-stroke;
+}
+
+.plan-element.locked {
+  cursor: not-allowed;
+}
+
+.plan-element.locked > rect,
+.plan-element.locked > line {
+  stroke-dasharray: 7 4;
+}
+
+.lock-indicator {
+  font-size: 12px;
+  paint-order: stroke;
+  stroke: white;
+  stroke-width: 3px;
+}
+
+.multi-selection-note {
+  margin: 14px;
+  padding: 13px;
+  border: 1px solid #d7e8e3;
+  border-radius: 11px;
+  background: #f2f9f7;
+}
+
+.multi-selection-note strong {
+  color: #0d625b;
+  font-size: 12px;
+}
+
+.multi-selection-note p {
+  margin: 5px 0 0;
+  color: #68766f;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.shortcut-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(9 24 20 / 48%);
+  backdrop-filter: blur(4px);
+}
+
+.shortcut-dialog {
+  width: min(520px, 100%);
+  max-height: min(720px, 86dvh);
+  overflow: auto;
+  border: 1px solid #dbe4df;
+  border-radius: 18px;
+  background: white;
+  box-shadow: 0 28px 70px rgb(9 30 23 / 24%);
+}
+
+.shortcut-heading {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 20px 15px;
+  border-bottom: 1px solid #e8eeeb;
+  background: white;
+}
+
+.shortcut-heading span {
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.shortcut-heading h2 {
+  margin: 4px 0 0;
+  font-size: 18px;
+  letter-spacing: -0.025em;
+}
+
+.shortcut-heading button {
+  width: 34px;
+  height: 34px;
+  border: 1px solid #dfe6e2;
+  border-radius: 9px;
+  background: #f7f9f8;
+  cursor: pointer;
+  font-size: 20px;
+}
+
+.shortcut-list {
+  display: grid;
+  gap: 1px;
+  padding: 10px 20px 20px;
+}
+
+.shortcut-row {
+  display: grid;
+  grid-template-columns: minmax(135px, 0.8fr) 1fr;
+  align-items: center;
+  gap: 18px;
+  padding: 10px 4px;
+  border-bottom: 1px solid #f0f3f1;
+  color: #56645e;
+  font-size: 12px;
+}
+
+.shortcut-row kbd {
+  justify-self: start;
+  padding: 5px 8px;
+  border: 1px solid #d9e2de;
+  border-bottom-width: 2px;
+  border-radius: 7px;
+  background: #f8faf9;
+  color: #24332d;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10px;
+  font-weight: 650;
 }
 
 .stage-status {
