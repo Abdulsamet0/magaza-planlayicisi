@@ -26,6 +26,7 @@ type Tool = "select" | "pan" | "wall" | "measure";
 type RectKind = "room" | "object";
 type LineKind = "wall" | "measure";
 type Point = { x: number; y: number };
+type SnapGuides = { vertical: number[]; horizontal: number[] };
 
 type RectElement = {
   id: string;
@@ -337,6 +338,10 @@ export default function Home() {
   const [tool, setTool] = useState<Tool>("select");
   const [draft, setDraft] = useState<DraftLine | null>(null);
   const [snapPoint, setSnapPoint] = useState<Point | null>(null);
+  const [snapGuides, setSnapGuides] = useState<SnapGuides>({
+    vertical: [],
+    horizontal: [],
+  });
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [gridVisible, setGridVisible] = useState(true);
   const [gridStep, setGridStep] = useState(0.25);
@@ -610,23 +615,16 @@ export default function Home() {
   }, []);
 
   const snappedPoint = useCallback(
-    (raw: Point, excludeId?: string) => {
-      if (!snapEnabled) return raw;
-      const gridCandidate = {
-        x: Math.round(raw.x / gridStep) * gridStep,
-        y: Math.round(raw.y / gridStep) * gridStep,
-      };
-      let best = gridCandidate;
-      let bestDistance = Math.hypot(
-        gridCandidate.x - raw.x,
-        gridCandidate.y - raw.y,
-      );
+    (raw: Point, excludeId?: string, bypass = false) => {
+      if (!snapEnabled || bypass) return raw;
+      let best = raw;
+      let bestDistance = Number.POSITIVE_INFINITY;
       const tolerance = Math.max(0.12, (camera.w / PLAN_WIDTH) * 0.22);
       elementsRef.current.forEach((element) => {
         if (element.id === excludeId || element.kind === "measure") return;
         scenePoints(element).forEach((point) => {
           const distance = Math.hypot(point.x - raw.x, point.y - raw.y);
-          if (distance < tolerance && distance < bestDistance + 0.04) {
+          if (distance < tolerance && distance < bestDistance) {
             best = point;
             bestDistance = distance;
           }
@@ -637,13 +635,73 @@ export default function Home() {
         y: roundMetric(clamp(best.y, 0, PLAN_HEIGHT_M)),
       };
     },
-    [camera.w, gridStep, snapEnabled],
+    [camera.w, snapEnabled],
+  );
+
+  const alignMovingRect = useCallback(
+    (rect: RectElement, bypass: boolean) => {
+      if (!snapEnabled || bypass) {
+        return { rect, guides: { vertical: [], horizontal: [] } as SnapGuides };
+      }
+
+      const tolerance = Math.max(0.1, (camera.w / PLAN_WIDTH) * 0.18);
+      const movingX = [rect.x, rect.x + rect.w / 2, rect.x + rect.w];
+      const movingY = [rect.y, rect.y + rect.h / 2, rect.y + rect.h];
+      let xOffset = 0;
+      let yOffset = 0;
+      let bestX = tolerance;
+      let bestY = tolerance;
+      let verticalGuide: number | null = null;
+      let horizontalGuide: number | null = null;
+
+      elementsRef.current.forEach((element) => {
+        if (element.id === rect.id || !isRect(element)) return;
+        const targetX = [element.x, element.x + element.w / 2, element.x + element.w];
+        const targetY = [element.y, element.y + element.h / 2, element.y + element.h];
+
+        movingX.forEach((source) => {
+          targetX.forEach((target) => {
+            const distance = Math.abs(target - source);
+            if (distance < bestX) {
+              bestX = distance;
+              xOffset = target - source;
+              verticalGuide = target;
+            }
+          });
+        });
+        movingY.forEach((source) => {
+          targetY.forEach((target) => {
+            const distance = Math.abs(target - source);
+            if (distance < bestY) {
+              bestY = distance;
+              yOffset = target - source;
+              horizontalGuide = target;
+            }
+          });
+        });
+      });
+
+      const aligned = {
+        ...rect,
+        x: roundMetric(clamp(rect.x + xOffset, 0, PLAN_WIDTH_M - rect.w)),
+        y: roundMetric(clamp(rect.y + yOffset, 0, PLAN_HEIGHT_M - rect.h)),
+      };
+      return {
+        rect: aligned,
+        guides: {
+          vertical: verticalGuide === null ? [] : [verticalGuide],
+          horizontal: horizontalGuide === null ? [] : [horizontalGuide],
+        },
+      };
+    },
+    [camera.w, snapEnabled],
   );
 
   const startMove = useCallback(
     (event: ReactPointerEvent<SVGElement>, element: PlanElement) => {
       event.preventDefault();
       event.stopPropagation();
+      setSnapGuides({ vertical: [], horizontal: [] });
       setSelectedId(element.id);
       const svg = svgRef.current;
       if (!svg) return;
@@ -731,7 +789,7 @@ export default function Home() {
         };
         return;
       }
-      const point = snappedPoint(svgPoint(event));
+      const point = snappedPoint(svgPoint(event), undefined, event.ctrlKey);
       if (!draft) {
         setDraft({ kind: tool, start: point, end: point });
         setSnapPoint(point);
@@ -799,7 +857,7 @@ export default function Home() {
       const raw = svgPoint(event);
       if (!interaction) {
         if (draft) {
-          const point = snappedPoint(raw);
+          const point = snappedPoint(raw, undefined, event.ctrlKey);
           setDraft((current) => (current ? { ...current, end: point } : null));
           setSnapPoint(point);
         }
@@ -807,22 +865,14 @@ export default function Home() {
       }
 
       if (interaction.type === "move") {
-        const point = snappedPoint(raw, interaction.id);
-        let dx = point.x - interaction.start.x;
-        let dy = point.y - interaction.start.y;
+        const dx = raw.x - interaction.start.x;
+        const dy = raw.y - interaction.start.y;
         const original = interaction.original;
-        if (snapEnabled) {
-          if (isRect(original)) {
-            dx =
-              Math.round((original.x + dx) / gridStep) * gridStep - original.x;
-            dy =
-              Math.round((original.y + dy) / gridStep) * gridStep - original.y;
-          }
-        }
+        let nextGuides: SnapGuides = { vertical: [], horizontal: [] };
         const next = interaction.before.map((element) => {
           if (element.id !== interaction.id) return element;
           if (isRect(original)) {
-            return {
+            const proposed: RectElement = {
               ...original,
               x: roundMetric(
                 clamp(original.x + dx, 0, PLAN_WIDTH_M - original.w),
@@ -831,7 +881,11 @@ export default function Home() {
                 clamp(original.y + dy, 0, PLAN_HEIGHT_M - original.h),
               ),
             };
+            const aligned = alignMovingRect(proposed, event.ctrlKey);
+            nextGuides = aligned.guides;
+            return aligned.rect;
           }
+          setSnapGuides({ vertical: [], horizontal: [] });
           return {
             ...original,
             x1: roundMetric(original.x1 + dx),
@@ -840,12 +894,23 @@ export default function Home() {
             y2: roundMetric(original.y2 + dy),
           };
         });
+        setSnapGuides(nextGuides);
         setSceneDirect(next);
         return;
       }
 
       if (interaction.type === "resize") {
-        const point = snappedPoint(raw, interaction.id);
+        const point = snappedPoint(raw, interaction.id, event.ctrlKey);
+        const snappedX = Math.abs(point.x - raw.x) > 0.001;
+        const snappedY = Math.abs(point.y - raw.y) > 0.001;
+        setSnapGuides(
+          event.ctrlKey || !snapEnabled
+            ? { vertical: [], horizontal: [] }
+            : {
+                vertical: snappedX ? [point.x] : [],
+                horizontal: snappedY ? [point.y] : [],
+              },
+        );
         const original = interaction.original;
         const right = original.x + original.w;
         const bottom = original.y + original.h;
@@ -882,7 +947,7 @@ export default function Home() {
         return;
       }
 
-      const point = snappedPoint(raw, interaction.id);
+      const point = snappedPoint(raw, interaction.id, event.ctrlKey);
       const changed: LineElement = {
         ...interaction.original,
         ...(interaction.endpoint === "start"
@@ -895,7 +960,7 @@ export default function Home() {
         ),
       );
     },
-    [draft, gridStep, setSceneDirect, snapEnabled, snappedPoint, svgPoint],
+    [alignMovingRect, draft, setSceneDirect, snapEnabled, snappedPoint, svgPoint],
   );
 
   const finishInteraction = useCallback(
@@ -909,6 +974,7 @@ export default function Home() {
         recordPast(interaction.before);
       }
       interactionRef.current = null;
+      setSnapGuides({ vertical: [], horizontal: [] });
       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
         event.currentTarget.releasePointerCapture(event.pointerId);
       }
@@ -1047,6 +1113,7 @@ export default function Home() {
       } else if (event.key === "Escape") {
         setDraft(null);
         setSnapPoint(null);
+        setSnapGuides({ vertical: [], horizontal: [] });
         setTool("select");
       } else if (event.key.toLowerCase() === "v") {
         setTool("select");
@@ -1082,7 +1149,7 @@ export default function Home() {
   const zoomPercent = Math.round((PLAN_WIDTH / camera.w) * 100);
   const instruction =
     tool === "select"
-      ? "Nesneyi sürükle; seçiliyken köşe tutamaçlarından boyutlandır."
+      ? "Kenar ve merkezlere akıllı hizalar. Ctrl basılıyken serbest taşı."
       : tool === "pan"
         ? "Planı görmek istediğin yöne sürükle. Fare tekeriyle yakınlaş."
         : draft
@@ -1390,9 +1457,12 @@ export default function Home() {
               <button
                 className={`toggle-button ${snapEnabled ? "active" : ""}`}
                 aria-pressed={snapEnabled}
-                onClick={() => setSnapEnabled((value) => !value)}
+                onClick={() => {
+                  setSnapEnabled((value) => !value);
+                  setSnapGuides({ vertical: [], horizontal: [] });
+                }}
               >
-                Yakala
+                Akıllı hizala
               </button>
               <span className="toolbar-divider" aria-hidden="true" />
               <button
@@ -1511,6 +1581,30 @@ export default function Home() {
 
               {orderedElements.map(renderElement)}
 
+              {(snapGuides.vertical.length > 0 ||
+                snapGuides.horizontal.length > 0) && (
+                <g className="alignment-guides" pointerEvents="none">
+                  {snapGuides.vertical.map((x) => (
+                    <line
+                      key={`v-${x}`}
+                      x1={x * SCALE}
+                      y1={0}
+                      x2={x * SCALE}
+                      y2={PLAN_HEIGHT}
+                    />
+                  ))}
+                  {snapGuides.horizontal.map((y) => (
+                    <line
+                      key={`h-${y}`}
+                      x1={0}
+                      y1={y * SCALE}
+                      x2={PLAN_WIDTH}
+                      y2={y * SCALE}
+                    />
+                  ))}
+                </g>
+              )}
+
               {draft && (
                 <g className={`draft-line ${draft.kind}`} pointerEvents="none">
                   <line
@@ -1597,6 +1691,7 @@ export default function Home() {
               Çalışma alanı: {PLAN_WIDTH_M} × {PLAN_HEIGHT_M} m
             </span>
             <span>Izgara: {gridStep * 100} cm</span>
+            <span>Ctrl: serbest yerleştir</span>
             <span>Fare tekeri: yakınlaştır</span>
             <span>Delete: sil</span>
           </div>

@@ -745,6 +745,14 @@ select:focus-visible {
   fill: var(--green);
 }
 
+.alignment-guides line {
+  stroke: #d946ef;
+  stroke-width: 1.35;
+  stroke-dasharray: 5 4;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 2px rgb(217 70 239 / 38%));
+}
+
 .stage-status {
   min-height: 27px;
   flex: 0 0 auto;
