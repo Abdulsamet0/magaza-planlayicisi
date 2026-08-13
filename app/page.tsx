@@ -367,6 +367,7 @@ export default function Home() {
     horizontal: [],
   });
   const [snapEnabled, setSnapEnabled] = useState(true);
+  const [gridSnapEnabled, setGridSnapEnabled] = useState(false);
   const [gridVisible, setGridVisible] = useState(true);
   const [gridStep, setGridStep] = useState(0.25);
   const [camera, setCamera] = useState<Camera>({
@@ -448,6 +449,7 @@ export default function Home() {
           const parsed = JSON.parse(saved) as {
             elements?: unknown;
             snapEnabled?: boolean;
+            gridSnapEnabled?: boolean;
             gridVisible?: boolean;
             gridStep?: number;
           };
@@ -455,6 +457,9 @@ export default function Home() {
           if (savedElements) setSceneDirect(cloneScene(savedElements));
           if (typeof parsed.snapEnabled === "boolean") {
             setSnapEnabled(parsed.snapEnabled);
+          }
+          if (typeof parsed.gridSnapEnabled === "boolean") {
+            setGridSnapEnabled(parsed.gridSnapEnabled);
           }
           if (typeof parsed.gridVisible === "boolean") {
             setGridVisible(parsed.gridVisible);
@@ -478,7 +483,13 @@ export default function Home() {
       try {
         window.localStorage.setItem(
           STORAGE_KEY,
-          JSON.stringify({ elements, snapEnabled, gridVisible, gridStep }),
+          JSON.stringify({
+            elements,
+            snapEnabled,
+            gridSnapEnabled,
+            gridVisible,
+            gridStep,
+          }),
         );
         setSaveLabel("Cihaza kaydedildi");
       } catch {
@@ -486,7 +497,7 @@ export default function Home() {
       }
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [elements, gridStep, gridVisible, hydrated, snapEnabled]);
+  }, [elements, gridSnapEnabled, gridStep, gridVisible, hydrated, snapEnabled]);
 
   const undo = useCallback(() => {
     if (!past.length) return;
@@ -782,15 +793,27 @@ export default function Home() {
 
   const snappedPoint = useCallback(
     (raw: Point, excludeId?: string, bypass = false) => {
-      if (!snapEnabled || bypass) return raw;
-      let best = raw;
-      let bestDistance = Number.POSITIVE_INFINITY;
+      if (bypass) return raw;
+      const gridCandidate = gridSnapEnabled
+        ? {
+            x: Math.round(raw.x / gridStep) * gridStep,
+            y: Math.round(raw.y / gridStep) * gridStep,
+          }
+        : raw;
+      if (!snapEnabled) return gridCandidate;
+      let best = gridCandidate;
+      let bestDistance = gridSnapEnabled
+        ? Math.hypot(gridCandidate.x - raw.x, gridCandidate.y - raw.y)
+        : Number.POSITIVE_INFINITY;
       const tolerance = Math.max(0.12, (camera.w / PLAN_WIDTH) * 0.22);
       elementsRef.current.forEach((element) => {
         if (element.id === excludeId || element.kind === "measure") return;
         scenePoints(element).forEach((point) => {
           const distance = Math.hypot(point.x - raw.x, point.y - raw.y);
-          if (distance < tolerance && distance < bestDistance) {
+          if (
+            distance < tolerance &&
+            (!gridSnapEnabled || distance < bestDistance)
+          ) {
             best = point;
             bestDistance = distance;
           }
@@ -801,18 +824,40 @@ export default function Home() {
         y: roundMetric(clamp(best.y, 0, PLAN_HEIGHT_M)),
       };
     },
-    [camera.w, snapEnabled],
+    [camera.w, gridSnapEnabled, gridStep, snapEnabled],
   );
 
   const alignMovingRect = useCallback(
     (rect: RectElement, bypass: boolean, excludeIds = new Set<string>([rect.id])) => {
-      if (!snapEnabled || bypass) {
+      if (bypass) {
         return { rect, guides: { vertical: [], horizontal: [] } as SnapGuides };
       }
 
+      const gridAligned = gridSnapEnabled
+        ? {
+            ...rect,
+            x: roundMetric(Math.round(rect.x / gridStep) * gridStep),
+            y: roundMetric(Math.round(rect.y / gridStep) * gridStep),
+          }
+        : rect;
+      if (!snapEnabled) {
+        return {
+          rect: gridAligned,
+          guides: { vertical: [], horizontal: [] } as SnapGuides,
+        };
+      }
+
       const tolerance = Math.max(0.1, (camera.w / PLAN_WIDTH) * 0.18);
-      const movingX = [rect.x, rect.x + rect.w / 2, rect.x + rect.w];
-      const movingY = [rect.y, rect.y + rect.h / 2, rect.y + rect.h];
+      const movingX = [
+        gridAligned.x,
+        gridAligned.x + gridAligned.w / 2,
+        gridAligned.x + gridAligned.w,
+      ];
+      const movingY = [
+        gridAligned.y,
+        gridAligned.y + gridAligned.h / 2,
+        gridAligned.y + gridAligned.h,
+      ];
       let xOffset = 0;
       let yOffset = 0;
       let bestX = tolerance;
@@ -848,9 +893,13 @@ export default function Home() {
       });
 
       const aligned = {
-        ...rect,
-        x: roundMetric(clamp(rect.x + xOffset, 0, PLAN_WIDTH_M - rect.w)),
-        y: roundMetric(clamp(rect.y + yOffset, 0, PLAN_HEIGHT_M - rect.h)),
+        ...gridAligned,
+        x: roundMetric(
+          clamp(gridAligned.x + xOffset, 0, PLAN_WIDTH_M - gridAligned.w),
+        ),
+        y: roundMetric(
+          clamp(gridAligned.y + yOffset, 0, PLAN_HEIGHT_M - gridAligned.h),
+        ),
       };
       return {
         rect: aligned,
@@ -860,7 +909,7 @@ export default function Home() {
         },
       };
     },
-    [camera.w, snapEnabled],
+    [camera.w, gridSnapEnabled, gridStep, snapEnabled],
   );
 
   const startMove = useCallback(
@@ -1780,6 +1829,17 @@ export default function Home() {
                 Izgara
               </button>
               <button
+                className={`toggle-button ${gridSnapEnabled ? "active" : ""}`}
+                aria-pressed={gridSnapEnabled}
+                title="Nesneleri seçili ızgara aralığına hizala"
+                onClick={() => {
+                  setGridSnapEnabled((value) => !value);
+                  setSnapGuides({ vertical: [], horizontal: [] });
+                }}
+              >
+                Izgaraya hizala
+              </button>
+              <button
                 className={`toggle-button ${snapEnabled ? "active" : ""}`}
                 aria-pressed={snapEnabled}
                 onClick={() => {
@@ -2029,6 +2089,9 @@ export default function Home() {
               Çalışma alanı: {PLAN_WIDTH_M} × {PLAN_HEIGHT_M} m
             </span>
             <span>Izgara: {gridStep * 100} cm</span>
+            <span>
+              Izgara hizası: {gridSnapEnabled ? "Açık" : "Kapalı"}
+            </span>
             <span>Ctrl: serbest yerleştir</span>
             <span>Sağ tuş / Space: gezin</span>
             <span>Ctrl + tık: çoklu seç</span>
